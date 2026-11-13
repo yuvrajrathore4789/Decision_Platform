@@ -1,0 +1,15 @@
+# One command: docker compose up --build   ->  API http://localhost:3000  Swagger http://localhost:3000/docs
+services:
+  mongo:
+    image: mongo:7
+    ports: ["27017:27017"]
+    volumes: [mongo-data:/data/db]
+  backend:
+    build: ./backend
+    ports: ["3000:3000"]
+    environment:
+      MONGO_URI: mongodb://mongo:27017/decision_platform
+      PORT: 3000
+    depends_on: [mongo]
+volumes:
+  mongo-data:

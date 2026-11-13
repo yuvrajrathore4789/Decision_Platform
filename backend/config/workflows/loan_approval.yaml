@@ -1,0 +1,38 @@
+# Workflow definition = DATA. Change a threshold or add a stage here (or POST a new version) - no engine code changes.
+workflow: loan_approval
+version: 1
+schema:                       # intake validation (JSON Schema)
+  type: object
+  required: [applicant_id, income, loan_amount, age]
+  properties:
+    applicant_id: { type: string, minLength: 1 }
+    income: { type: number, minimum: 0 }
+    loan_amount: { type: number, exclusiveMinimum: 0 }
+    age: { type: number }
+    mock_credit_score: { type: number }      # test hook for the simulated bureau
+    simulate_failure: { type: object }       # test hook: { service, fail_times, mode }
+start: mandatory_checks
+stages:
+  mandatory_checks:
+    type: rules
+    rules:
+      - { id: R1, description: Applicant must be an adult, field: age, op: gte, value: 18, on_fail: reject }
+      - { id: R2, description: Income must be positive, field: income, op: gt, value: 0, on_fail: reject }
+    next: credit_check
+  credit_check:
+    type: external_call
+    service: credit_bureau
+    max_attempts: 3
+    backoff_ms: 1000
+    timeout_ms: 2000
+    on_exhausted: manual_review
+    next: threshold_checks
+  threshold_checks:
+    type: rules
+    rules:
+      - { id: R3, description: Loan must not exceed 5x income, expr: "loan_amount <= income * 5", on_fail: manual_review }
+      - { id: R4, description: Credit score must be at least 650, expr: "credit_check.score >= 650", on_fail: reject }
+    next: approve
+  approve: { type: terminal, outcome: APPROVED }
+  reject: { type: terminal, outcome: REJECTED }
+  manual_review: { type: manual_review }

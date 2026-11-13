@@ -1,0 +1,37 @@
+# A second business use case running on the SAME engine, with zero code changes.
+workflow: vendor_approval
+version: 1
+schema:
+  type: object
+  required: [vendor_id, country, years_in_business, annual_revenue]
+  properties:
+    vendor_id: { type: string, minLength: 1 }
+    country: { type: string }
+    years_in_business: { type: number, minimum: 0 }
+    annual_revenue: { type: number, minimum: 0 }
+    mock_kyc_verified: { type: boolean }
+    simulate_failure: { type: object }
+start: mandatory_checks
+stages:
+  mandatory_checks:
+    type: rules
+    rules:
+      - { id: V1, description: Vendor must operate in a supported country, field: country, op: in, value: [IN, US, UK, DE], on_fail: reject }
+      - { id: V2, description: At least 2 years in business, field: years_in_business, op: gte, value: 2, on_fail: manual_review }
+    next: kyc_check
+  kyc_check:
+    type: external_call
+    service: kyc
+    max_attempts: 2
+    backoff_ms: 1000
+    on_exhausted: manual_review
+    next: kyc_result
+  kyc_result:
+    type: rules
+    rules:
+      - { id: V3, description: KYC must be verified, expr: "kyc_check.verified == true", on_fail: reject }
+      - { id: V4, description: Revenue must be at least 100000, expr: "annual_revenue >= 100000", on_fail: manual_review }
+    next: approve
+  approve: { type: terminal, outcome: APPROVED }
+  reject: { type: terminal, outcome: REJECTED }
+  manual_review: { type: manual_review }
