@@ -25,9 +25,9 @@ export const api = {
       body: JSON.stringify({ workflow, payload }),
     }),
   retry: (id) => call(`/api/requests/${id}/retry`, { method: 'POST' }),
-  review: (id, decision) =>
+  review: (id, decision, comment) =>
     call(`/api/requests/${id}/review`, {
       method: 'POST',
-      body: JSON.stringify({ decision, reviewer: 'ui-reviewer', comment: 'Decided in UI' }),
+      body: JSON.stringify({ decision, reviewer: 'ui-reviewer', ...(comment ? { comment } : {}) }),
     }),
 };
