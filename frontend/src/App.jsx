@@ -1,16 +1,19 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { api } from './api.js';
+import './enhancements.css';
 
 const SAMPLES = {
   loan_approval: {
     'Approve': { applicant_id: 'A-1001', income: 60000, loan_amount: 150000, age: 30, mock_credit_score: 720 },
     'Reject (underage)': { applicant_id: 'A-1002', income: 60000, loan_amount: 10000, age: 16 },
+    'Reject (low credit score)': { applicant_id: 'A-1005', income: 60000, loan_amount: 100000, age: 40, mock_credit_score: 500 },
     'Manual review (loan too big)': { applicant_id: 'A-1003', income: 40000, loan_amount: 400000, age: 35, mock_credit_score: 700 },
     'Dependency fails once (retry)': { applicant_id: 'A-1004', income: 70000, loan_amount: 100000, age: 29, mock_credit_score: 700, simulate_failure: { service: 'credit_bureau', fail_times: 1 } },
   },
   vendor_approval: {
     'Approve': { vendor_id: 'V-77', country: 'IN', years_in_business: 5, annual_revenue: 500000 },
     'Reject (unsupported country)': { vendor_id: 'V-78', country: 'XX', years_in_business: 5, annual_revenue: 500000 },
+    'KYC down: retry, then review, then resume': { vendor_id: 'V-79', country: 'IN', years_in_business: 5, annual_revenue: 500000, simulate_failure: { service: 'kyc', fail_times: 10 } },
   },
   claim_processing: {
     'Auto-approve (small claim)': { claim_id: 'CL-1', policy_id: 'P-1', policy_active: true, incident_type: 'accident', claim_amount: 4200, coverage_limit: 100000 },
@@ -38,6 +41,8 @@ const STEP_LABEL = {
   BRANCH_TAKEN: 'Route chosen',
   DEPENDENCY_SUCCESS: 'Dependency answered',
   DEPENDENCY_FAILURE: 'Dependency failed',
+  RETRY_STARTED: 'Retry started',
+  REVIEW_CLAIMED: 'Review picked up',
   RETRIES_EXHAUSTED: 'Retries used up',
   MANUAL_REVIEW_REQUIRED: 'Sent to review',
   MANUAL_REVIEW_DECISION: 'Reviewer decided',
@@ -51,6 +56,8 @@ function stepTone(s) {
     case 'BRANCH_TAKEN': return 'info';
     case 'DEPENDENCY_SUCCESS': return 'ok';
     case 'DEPENDENCY_FAILURE': return 'retry';
+    case 'RETRY_STARTED': return 'retry';
+    case 'REVIEW_CLAIMED': return 'info';
     case 'RETRIES_EXHAUSTED': return 'bad';
     case 'MANUAL_REVIEW_REQUIRED': return 'warn';
     case 'MANUAL_REVIEW_DECISION': return 'info';
@@ -74,6 +81,26 @@ const friendly = (e) => (/failed to fetch|networkerror/i.test(e.message)
 
 /** Flatten a small object into [key, value] pairs for the "data used" chips. */
 const pairs = (o) => Object.entries(o || {}).map(([k, v]) => [k, typeof v === 'object' ? JSON.stringify(v) : String(v)]);
+
+/** Fields worth showing for steps that carry no rule inputs (retry / review bookkeeping). */
+const EXTRA_DATA = ['RETRY_STARTED', 'REVIEW_CLAIMED', 'MANUAL_REVIEW_DECISION'];
+const extraPairs = (s) => (EXTRA_DATA.includes(s.type) ? pairs(s.data).filter(([, v]) => v !== 'null') : []);
+const shortHash = (h) => (h ? h.slice(0, 8) : null);
+
+/** Result of the audit hash-chain check returned by the API. */
+function Seal({ integrity }) {
+  if (!integrity) return null;
+  if (!integrity.valid) {
+    return <span className="seal tone-bad" role="alert">Audit log was altered (first bad entry #{integrity.brokenAtSeq})</span>;
+  }
+  if (!integrity.checked) return <span className="seal tone-neutral" title="Created before hash chaining existed">Audit log predates tamper checks</span>;
+  return (
+    <span className="seal tone-ok" title={`Chain head ${integrity.headHash}`}>
+      <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.2 12 3v3.7c0 2.8-2 5-5 6-3-1-5-3.2-5-6V3z" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" /><path d="m4.8 7.2 1.7 1.7 3-3.2" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+      Audit verified: {integrity.checked} entries hash-chained
+    </span>
+  );
+}
 
 function Tag({ status }) {
   const m = STATUS[status] || { label: status, tone: 'neutral' };
@@ -128,13 +155,14 @@ function Trail({ steps }) {
   return (
     <ol className="trail">
       {steps.map((s) => {
-        const used = [...pairs(s.data && s.data.inputs), ...pairs(s.data && s.data.result)];
+        const used = [...pairs(s.data && s.data.inputs), ...pairs(s.data && s.data.result), ...extraPairs(s)];
         return (
           <li key={s.seq} className={`step tone-${stepTone(s)}`}>
             <span className="step-dot" aria-hidden="true" />
             <div className="step-head">
               <h4>{STEP_LABEL[s.type] || s.type}</h4>
               {s.stage && <span className="stage-chip">{words(s.stage)}</span>}
+              {s.hash && <code className="hash" title={`Entry hash ${s.hash}`}>#{shortHash(s.hash)}</code>}
               <time>{clock(s.at)}</time>
             </div>
             <p className="step-msg">{s.message}</p>
@@ -165,6 +193,7 @@ function Detail({ ex, onRetry, onReview, busy }) {
           <h2>{(STATUS[ex.status] || {}).label || ex.status}</h2>
           <p className="meta">{ex.workflow} v{ex.workflowVersion} <span aria-hidden="true">/</span> <code>{ex.requestId}</code></p>
           <p className="reason">{text}</p>
+          <Seal integrity={ex.integrity} />
         </div>
         {ex.status === 'RETRY_PENDING' && (
           <div className="actions">
@@ -221,14 +250,38 @@ function Detail({ ex, onRetry, onReview, busy }) {
 }
 
 /* ---------- new request ---------- */
-function Intake({ names, workflows, onSubmit, busy }) {
+/** Version list with one-click rollback / roll-forward. Only shown when there is more than one version. */
+function Versions({ versions, live, onActivate, busy }) {
+  if (versions.length < 2) return null;
+  return (
+    <section className="versions" aria-label="Workflow versions">
+      <h3>Versions</h3>
+      <ul>
+        {versions.map((v) => (
+          <li key={v.version} className={live && v.version === live.version ? 'live' : ''}>
+            <span className="v-name">v{v.version}</span>
+            <span className="muted small">{v.stages.length} stages</span>
+            {live && v.version === live.version
+              ? <span className="live-pill">Live</span>
+              : <button type="button" className="btn small-btn" disabled={busy} onClick={() => onActivate(v.name, v.version)}>Make live</button>}
+          </li>
+        ))}
+      </ul>
+      <p className="muted small">Requests already running keep the version they started with.</p>
+    </section>
+  );
+}
+
+function Intake({ names, workflows, onSubmit, onActivate, busy }) {
   const [workflow, setWorkflow] = useState('loan_approval');
   const [label, setLabel] = useState(null);
   const [payload, setPayload] = useState(JSON.stringify(Object.values(SAMPLES.loan_approval)[0], null, 2));
   const [key, setKey] = useState('');
   const samples = SAMPLES[workflow] || {};
   const jsonError = useMemo(() => { try { JSON.parse(payload); return null; } catch (e) { return e.message; } }, [payload]);
-  const def = workflows.filter((w) => w.name === workflow).sort((a, b) => b.version - a.version)[0];
+  const versions = workflows.filter((w) => w.name === workflow).sort((a, b) => b.version - a.version);
+  const live = versions.find((w) => w.active); // newest active version is the one new requests use
+  const def = live || versions[0];
 
   const choose = (name) => {
     setWorkflow(name);
@@ -247,8 +300,10 @@ function Intake({ names, workflows, onSubmit, busy }) {
         <select value={workflow} onChange={(e) => choose(e.target.value)}>
           {(names.length ? names : ['loan_approval']).map((n) => <option key={n} value={n}>{words(n)}</option>)}
         </select>
-        {def && <span className="muted small">Version {def.version}, {def.stages.length} stages</span>}
+        {def && <span className="muted small">Live version {def.version}, {def.stages.length} stages</span>}
       </label>
+
+      <Versions versions={versions} live={live} onActivate={onActivate} busy={busy} />
 
       <fieldset className="scenarios">
         <legend>Scenarios</legend>
@@ -274,9 +329,12 @@ function Intake({ names, workflows, onSubmit, busy }) {
 }
 
 /* ---------- sidebar ---------- */
-function Sidebar({ items, selectedId, filter, setFilter, onOpen, onNew, creating }) {
+function Sidebar({ items, selectedId, filter, setFilter, query, setQuery, onOpen, onNew, creating }) {
   const counts = { all: items.length, action: items.filter((r) => NEEDS_ACTION.includes(r.status)).length, done: items.filter((r) => FINAL.includes(r.status)).length };
-  const shown = items.filter((r) => filter === 'all' || (filter === 'action' ? NEEDS_ACTION.includes(r.status) : FINAL.includes(r.status)));
+  const q = query.trim().toLowerCase();
+  const shown = items
+    .filter((r) => filter === 'all' || (filter === 'action' ? NEEDS_ACTION.includes(r.status) : FINAL.includes(r.status)))
+    .filter((r) => !q || r.id.toLowerCase().includes(q) || words(r.workflow).toLowerCase().includes(q) || (STATUS[r.status] || { label: r.status }).label.toLowerCase().includes(q));
   return (
     <aside className="side" aria-label="Requests">
       <button className={`btn primary wide${creating ? ' on' : ''}`} onClick={onNew}>New request</button>
@@ -287,6 +345,7 @@ function Sidebar({ items, selectedId, filter, setFilter, onOpen, onNew, creating
           </button>
         ))}
       </div>
+      <input className="search" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search by id, workflow or status" aria-label="Search requests" />
       <ul className="requests">
         {shown.map((r) => {
           const m = STATUS[r.status] || { label: r.status, tone: 'neutral' };
@@ -318,6 +377,7 @@ export default function App() {
   const [selected, setSelected] = useState(null);
   const [creating, setCreating] = useState(true);
   const [filter, setFilter] = useState('all');
+  const [query, setQuery] = useState('');
   const [toast, setToast] = useState(null);
   const [busy, setBusy] = useState(false);
   const selRef = useRef(null);
@@ -356,6 +416,12 @@ export default function App() {
     say({ ok: decision === 'approve' ? 'Approved.' : 'Rejected.' });
     await refresh(); await open(selected.requestId);
   });
+  const activate = (name, version) => run(async () => {
+    if (!window.confirm(`Make ${words(name)} v${version} the live version? New requests will use it; running requests keep their own version.`)) return;
+    const r = await api.activate(name, version);
+    say({ ok: `${words(name)} v${r.version} is now live (was ${r.previousVersion ? `v${r.previousVersion}` : 'none'}).` });
+    setWorkflows(await api.workflows());
+  });
   const pick = (id) => run(async () => { await open(id); setCreating(false); });
 
   return (
@@ -369,11 +435,11 @@ export default function App() {
       </header>
 
       <div className="body">
-        <Sidebar items={items} selectedId={selected && selected.requestId} filter={filter} setFilter={setFilter}
+        <Sidebar items={items} selectedId={selected && selected.requestId} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery}
           onOpen={pick} onNew={() => setCreating(true)} creating={creating} />
         <main className="main">
           {creating || !selected
-            ? <Intake names={names} workflows={workflows} onSubmit={submit} busy={busy} />
+            ? <Intake names={names} workflows={workflows} onSubmit={submit} onActivate={activate} busy={busy} />
             : <Detail ex={selected} onRetry={retry} onReview={review} busy={busy} />}
         </main>
       </div>

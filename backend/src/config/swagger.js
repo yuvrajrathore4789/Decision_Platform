@@ -19,7 +19,7 @@ module.exports = {
       get: { summary: 'List requests', parameters: [{ name: 'status', in: 'query', schema: { type: 'string' } }, { name: 'workflow', in: 'query', schema: { type: 'string' } }], responses: { 200: ok('OK') } },
     },
     '/api/requests/{id}': { get: { summary: 'Get request status', parameters: [idParam], responses: { 200: ok('OK'), 404: ok('Not found') } } },
-    '/api/requests/{id}/audit': { get: { summary: 'Full audit log and state history', parameters: [idParam], responses: { 200: ok('OK') } } },
+    '/api/requests/{id}/audit': { get: { summary: 'Full audit log, state history and hash-chain integrity check', parameters: [idParam], responses: { 200: ok('OK') } } },
     '/api/requests/{id}/explanation': { get: { summary: 'Human-readable decision explanation with rule trace', parameters: [idParam], responses: { 200: ok('OK') } } },
     '/api/requests/{id}/retry': { post: { summary: 'Retry a RETRY_PENDING request now', parameters: [idParam], responses: { 200: ok('OK'), 409: ok('Not retryable') } } },
     '/api/requests/{id}/review': { post: { summary: 'Approve or reject a MANUAL_REVIEW request', parameters: [idParam], requestBody: jsonBody(ref('Review')), responses: { 200: ok('OK'), 409: ok('Not in manual review') } } },
@@ -28,6 +28,7 @@ module.exports = {
       post: { summary: 'Register a new workflow version (rule change without redeploy)', requestBody: jsonBody({ type: 'object' }), responses: { 201: ok('Registered'), 400: ok('Invalid definition'), 409: ok('Version already exists') } },
     },
     '/api/workflows/{name}': { get: { summary: 'Latest definition', parameters: [{ name: 'name', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: ok('OK') } } },
+    '/api/workflows/{name}/{version}/activate': { post: { summary: 'Make this version the live one (rollback / roll-forward)', parameters: [{ name: 'name', in: 'path', required: true, schema: { type: 'string' } }, { name: 'version', in: 'path', required: true, schema: { type: 'integer' } }], responses: { 200: ok('Activated'), 404: ok('Unknown workflow or version') } } },
     '/api/workflows/{name}/{version}': { get: { summary: 'Specific version', parameters: [{ name: 'name', in: 'path', required: true, schema: { type: 'string' } }, { name: 'version', in: 'path', required: true, schema: { type: 'integer' } }], responses: { 200: ok('OK') } } },
   },
   components: {

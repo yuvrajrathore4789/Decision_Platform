@@ -1,7 +1,7 @@
 'use strict';
 const Ajv = require('ajv');
 const { validateRule } = require('../engine/rulesEngine');
-const { KNOWN_SERVICES } = require('../adapters/dependencyAdapter');
+const { isKnownService } = require('../adapters/dependencyAdapter');
 const { STAGE_TYPES } = require('./constants');
 
 const ajv = new Ajv({ allErrors: true, strict: false });
@@ -15,8 +15,12 @@ function buildGraph(stages) {
     if (st && st.type === 'rules') out.push(st.next, ...(Array.isArray(st.rules) ? st.rules : []).map((r) => r && r.on_fail));
     else if (st && st.type === 'external_call') out.push(st.next, st.on_exhausted);
     else if (st && st.type === 'branch') out.push(st.default, ...(Array.isArray(st.branches) ? st.branches : []).map((b) => b && b.next));
-    else if (st && st.type === 'manual_review') out.push(...terminals);
-    edges[id] = [...new Set(out.filter((t) => t && stages[t]))];
+    else if (st && st.type === 'manual_review') {
+      // Explicit resume stages when configured; otherwise a human decision can end in any matching terminal stage.
+      const byOutcome = (o) => terminals.filter((t) => stages[t].outcome === o);
+      out.push(st.on_approve || byOutcome('APPROVED'), st.on_reject || byOutcome('REJECTED'));
+    }
+    edges[id] = [...new Set(out.flat().filter((t) => t && stages[t]))];
   }
   return edges;
 }
@@ -76,7 +80,7 @@ function validateDefinition(def) {
       exists(st.next, `stage "${id}" next`);
     }
     if (st.type === 'external_call') {
-      if (!KNOWN_SERVICES.includes(st.service)) errors.push(`stage "${id}": unknown service "${st.service}"`);
+      if (!isKnownService(st.service)) errors.push(`stage "${id}": unknown service "${st.service}"`);
       if (st.max_attempts !== undefined && !(st.max_attempts >= 1)) errors.push(`stage "${id}": max_attempts must be >= 1`);
       exists(st.next, `stage "${id}" next`);
       exists(st.on_exhausted, `stage "${id}" on_exhausted`);
@@ -88,6 +92,11 @@ function validateDefinition(def) {
         exists(b.next, `stage "${id}" branch ${b.id} next`);
       });
       exists(st.default, `stage "${id}" default`); // a branch must always have a route
+    }
+    if (st.type === 'manual_review') {
+      // Optional: where the workflow resumes after the human decision (so later rules still run).
+      if (st.on_approve !== undefined) exists(st.on_approve, `stage "${id}" on_approve`);
+      if (st.on_reject !== undefined) exists(st.on_reject, `stage "${id}" on_reject`);
     }
     if (st.type === 'terminal') {
       terminals += 1;

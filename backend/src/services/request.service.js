@@ -6,6 +6,7 @@ const workflowService = require('./workflow.service');
 const idempotency = require('./idempotency.service');
 const audit = require('./audit.service');
 const engine = require('../engine/workflowEngine');
+const adapter = require('../adapters/dependencyAdapter');
 const env = require('../config/env');
 const { STATUS, SIMULATION_HOOK_FIELDS } = require('../utils/constants');
 const { sha256 } = require('../utils/hash');
@@ -39,7 +40,8 @@ function assertSafeKeys(value, path = '') {
 /** Simulation hooks let a caller fake dependency results, so they are refused unless SIMULATION_MODE is on. */
 function assertNoSimulationHooks(payload) {
   if (env.SIMULATION_MODE) return;
-  const used = SIMULATION_HOOK_FIELDS.filter((f) => Object.prototype.hasOwnProperty.call(payload, f));
+  const hooks = new Set([...SIMULATION_HOOK_FIELDS, ...adapter.hookFields()]); // hook fields declared in config/services.yaml count too
+  const used = [...hooks].filter((f) => Object.prototype.hasOwnProperty.call(payload, f));
   if (used.length) {
     throw badRequest(`Simulation hooks are disabled (SIMULATION_MODE=false): ${used.join(', ')}`, used.map((f) => ({ path: `/${f}`, message: 'not allowed outside simulation mode' })));
   }
@@ -129,14 +131,19 @@ async function claim(id, fromStatus, reason) {
   );
 }
 
-/** Retry a request that is RETRY_PENDING (manual trigger ignores nextRetryAt). */
-async function retry(id) {
+/** Retry a request that is RETRY_PENDING (manual trigger ignores nextRetryAt). trigger: 'manual' | 'worker'. */
+async function retry(id, { trigger = 'manual' } = {}) {
   const existing = await getById(id);
   if (existing.status !== STATUS.RETRY_PENDING) {
     throw conflict(`Cannot retry a request in status ${existing.status}; only RETRY_PENDING can be retried`);
   }
   const claimed = await claim(id, STATUS.RETRY_PENDING, 'Retry triggered');
   if (!claimed) throw conflict('Request was already picked up by another retry');
+  audit.add(claimed, {
+    type: 'RETRY_STARTED', stage: claimed.currentStage,
+    message: `Retry claimed (${trigger}) at stage "${claimed.currentStage}"`,
+    data: { trigger, attemptsSoFar: claimed.attempts[claimed.currentStage] || 0 },
+  });
   const def = await workflowService.getVersion(claimed.workflow, claimed.workflowVersion); // pinned version
   await engine.run(claimed, def);
   return claimed;
@@ -149,6 +156,11 @@ async function review(id, { decision, reviewer, comment }) {
   }
   const claimed = await claim(id, STATUS.MANUAL_REVIEW, `Review started by ${reviewer}`);
   if (!claimed) throw conflict('Request was already reviewed');
+  audit.add(claimed, {
+    type: 'REVIEW_CLAIMED', stage: claimed.currentStage,
+    message: `${reviewer} claimed the review`,
+    data: { reviewer },
+  });
   const def = await workflowService.getVersion(claimed.workflow, claimed.workflowVersion);
   await engine.review(claimed, def, { decision, reviewer, comment });
   return claimed;
@@ -159,24 +171,36 @@ async function processDueRetries(limit = 20) {
   const due = await Request.find({ status: STATUS.RETRY_PENDING, nextRetryAt: { $lte: new Date() } }, { _id: 1 }).limit(limit);
   let processed = 0;
   for (const { _id } of due) {
-    try { await retry(String(_id)); processed += 1; } catch (e) { if (e.status !== 409) throw e; }
+    try { await retry(String(_id), { trigger: 'worker' }); processed += 1; } catch (e) { if (e.status !== 409) throw e; }
   }
   return processed;
 }
 
-/** Resume requests stuck IN_PROGRESS (e.g. process crashed after a partial save). */
+/**
+ * Resume requests stuck IN_PROGRESS (e.g. process crashed after a partial save).
+ * A worker takes a lease (lockedUntil) with one atomic update, so two workers can never resume the same request.
+ * If the worker itself dies, the lease expires and another worker picks the request up.
+ */
 async function recoverStuck(limit = 20) {
-  const cutoff = new Date(Date.now() - env.STUCK_AFTER_MS);
+  const now = new Date();
+  const cutoff = new Date(now.getTime() - env.STUCK_AFTER_MS);
   let recovered = 0;
   for (let i = 0; i < limit; i += 1) {
     const doc = await Request.findOneAndUpdate(
-      { status: STATUS.IN_PROGRESS, updatedAt: { $lt: cutoff } },
-      { $push: { auditLog: { at: new Date(), type: 'RECOVERY', message: 'Resumed after being stuck IN_PROGRESS' } } },
+      {
+        status: STATUS.IN_PROGRESS,
+        updatedAt: { $lt: cutoff },
+        $or: [{ lockedUntil: null }, { lockedUntil: { $exists: false } }, { lockedUntil: { $lt: now } }],
+      },
+      { $set: { lockedUntil: new Date(now.getTime() + env.RECOVERY_LOCK_MS) } },
       { new: true }
     );
     if (!doc) break;
+    audit.add(doc, { type: 'RECOVERY', stage: doc.currentStage, message: `Resumed at "${doc.currentStage}" after being stuck IN_PROGRESS` });
     const def = await workflowService.getVersion(doc.workflow, doc.workflowVersion);
     await engine.run(doc, def);
+    doc.lockedUntil = null; // release the lease; if run() throws above, the lease simply expires
+    await doc.save();
     recovered += 1;
   }
   return recovered;

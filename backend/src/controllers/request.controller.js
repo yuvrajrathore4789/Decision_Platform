@@ -26,7 +26,7 @@ exports.get = asyncHandler(async (req, res) => {
 
 exports.getAudit = asyncHandler(async (req, res) => {
   const doc = await requestService.getById(req.params.id);
-  res.json({ requestId: String(doc._id), stateHistory: doc.stateHistory, auditLog: doc.auditLog });
+  res.json({ requestId: String(doc._id), stateHistory: doc.stateHistory, auditLog: doc.auditLog, integrity: audit.verifyChain(doc.auditLog) });
 });
 
 exports.getExplanation = asyncHandler(async (req, res) => {

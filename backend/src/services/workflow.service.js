@@ -57,4 +57,18 @@ async function list() {
   return docs.map((d) => ({ name: d.name, version: d.version, active: d.active, stages: Object.keys(d.definition.stages), createdAt: d.createdAt }));
 }
 
-module.exports = { seedFromFiles, register, getActive, getVersion, list };
+/**
+ * Make one stored version THE live version (rollback or roll-forward). Nothing is rewritten: versions stay immutable,
+ * only the `active` flag moves. In-flight requests keep their pinned version either way.
+ */
+async function activate(name, version) {
+  const target = await WorkflowDefinition.findOne({ name, version: Number(version) });
+  if (!target) throw notFound(`Workflow "${name}" v${version} not found`);
+  const previous = await WorkflowDefinition.findOne({ name, active: true }).sort({ version: -1 });
+  await WorkflowDefinition.updateOne({ _id: target._id }, { $set: { active: true } }); // activate first: there is never a moment with no live version
+  await WorkflowDefinition.updateMany({ name, _id: { $ne: target._id } }, { $set: { active: false } });
+  logger.info(`Workflow ${name}: active version is now v${target.version} (was ${previous ? `v${previous.version}` : 'none'})`);
+  return { name, version: target.version, previousVersion: previous ? previous.version : null };
+}
+
+module.exports = { seedFromFiles, register, getActive, getVersion, list, activate };

@@ -41,7 +41,7 @@ flowchart LR
 | Idempotency Service | Race-safe claim of a key via unique index | Model |
 | Workflow Engine | Runs stages, transitions state, writes history and audit | Rules Engine, Adapter, Audit |
 | Rules Engine | Evaluates rules and returns a per-rule trace; **no `eval`** | none |
-| Dependency Adapter | Simulated credit bureau / KYC with timeout and failure injection | none |
+| Dependency Adapter | Simulated credit bureau / KYC / fraud engine, defined in `config/services.yaml`, with timeout and failure injection | none |
 | Retry Worker | Polls due retries and stuck requests | Request Service |
 
 Coupling is one-directional (controllers -> services -> engine -> pure helpers). The engine and rules engine have no
@@ -56,7 +56,7 @@ A workflow is a document: `schema` (JSON Schema for intake), `start`, and `stage
 | `rules` | `rules[]`, `next` | Rules run in order. All pass -> `next`. First failure -> that rule's `on_fail` stage |
 | `branch` | `branches[]` (rule-shaped condition + `next`), `default` | Conditional routing on the passing path: first matching branch wins, otherwise `default`. Every evaluated condition is traced |
 | `external_call` | `service`, `max_attempts`, `backoff_ms`, `timeout_ms`, `next`, `on_exhausted` | Success stores output in context. Failure -> `RETRY_PENDING` with exponential backoff; after `max_attempts` -> `on_exhausted` |
-| `manual_review` | none | Parks the request until `POST /review` |
+| `manual_review` | optional `on_approve`, `on_reject` | Parks the request until `POST /review`. After the decision the workflow resumes at `on_approve` / `on_reject` (so later rules still run); if omitted it goes straight to a terminal stage |
 | `terminal` | `outcome: APPROVED \| REJECTED` | Final decision |
 
 Rules are structured (`{id, field, op, value, on_fail}` with ops `eq neq gt gte lt lte in exists`), expressions
@@ -66,6 +66,10 @@ Rules can read the request payload and the outputs of earlier stages (`credit_ch
 **Changing requirements:** edit a threshold, add a stage, or re-route a failure in YAML, or `POST /api/workflows` with a
 new `version`. Definitions are validated on load (unknown stages, bad expressions, unknown services, missing terminals),
 so a bad config is rejected instead of activated. A new use case is a new file: `vendor_approval.yaml` and `claim_processing.yaml` required no engine code.
+
+**Services are config too.** External dependencies are declared in `config/services.yaml` (`kind: hash_score` or `static`, with optional simulation-only mock fields). Adding a dependency is a YAML block; the validator accepts it in `external_call` stages immediately. A new *kind* of behaviour is one small function in the adapter. Mock fields declared in the file are automatically refused when `SIMULATION_MODE=false`.
+
+**Version control of workflows:** versions are immutable. `POST /api/workflows/:name/:version/activate` moves the `active` flag (rollback or roll-forward) without rewriting anything; requests already in flight keep the version they were pinned to.
 
 **Graph validation at load time:** besides references and expressions, the validator builds the stage graph and rejects cycles, stages unreachable from `start`, and a `manual_review` stage without both an `APPROVED` and a `REJECTED` terminal. The runtime step limit remains as a second line of defence. A retry is not a cycle: it is a state (`RETRY_PENDING`) on the same stage.
 
@@ -115,6 +119,7 @@ Every transition appends `{from, to, fromStage, toStage, reason, at}` to `stateH
 | Optimistic concurrency | Mongoose version key; conflicts surface as 409 |
 | Misconfigured cycles | Rejected when the workflow is loaded (graph check); engine step limit (50) as a runtime backstop |
 | Simulation hooks abused | `mock_*` / `simulate_failure` payload fields are rejected with 400 and ignored by the adapters unless `SIMULATION_MODE=true` |
+| Two workers recover the same stuck request | The worker takes a lease (`lockedUntil`) with one atomic `findOneAndUpdate`; others skip it. If the worker dies, the lease expires and the request is picked up again |
 | Rule that cannot be evaluated | Counts as **failed**, never silently passed |
 
 ## 7. Explainability and audit
@@ -123,6 +128,8 @@ Each step appends an audit entry. Rule evaluations store a trace per rule: rule 
 actual value, expected value, result and a plain-language reason, plus a data reference (input values and payload hash).
 `GET /requests/:id/explanation` turns this into a summary and step list. Requests also store `workflowVersion`, so every
 decision can be reproduced against the exact rules that made it. See `docs/decision_examples.md`.
+
+**Tamper evidence.** Every audit entry stores `prevHash` and `hash` (SHA-256 over its content plus the previous hash), forming a chain. `GET /requests/:id/audit` and `/explanation` return an `integrity` verdict (`valid`, `brokenAtSeq`, `headHash`). Editing, deleting or re-ordering an entry in the middle of the log is detected and pinpointed. Retries (`RETRY_STARTED`, manual or worker), review claims (`REVIEW_CLAIMED`) and crash recovery (`RECOVERY`) are audit entries too, not just state-history lines. Limit: a hash chain proves internal consistency, not that the *tail* was not truncated, so a client that needs that guarantee stores `headHash` externally; a production system would also sign the head or write it to an append-only store.
 
 ## 8. Trade-offs
 
@@ -135,6 +142,9 @@ decision can be reproduced against the exact rules that made it. See `docs/decis
 | Synchronous execution in the request | Simple, immediate result | Long dependencies block the HTTP call; the `RETRY_PENDING` path already moves slow work out of band |
 | Polling retry worker in-process | No extra infrastructure | At scale: queue + worker pool |
 | Mongo unique index for idempotency | Correct under concurrency without locks | Keys accumulate; add a TTL index in production |
+| Hash-chained audit log instead of a separate signed ledger | Tamper detection with no extra infrastructure | Detects edits, not tail truncation, unless `headHash` is stored elsewhere |
+| Lease (`lockedUntil`) for recovery instead of a distributed lock | One atomic Mongo update; self-heals if a worker dies | Needs a sensible `RECOVERY_LOCK_MS`; a very slow run could outlive its lease |
+| Services as YAML kinds, not plugins | New dependency = config; no code | A genuinely new behaviour still needs one small function in the adapter |
 | Stop at first failing rule in a stage | Clear, short audit story | Does not report *all* violations at once |
 
 ## 9. Assumptions

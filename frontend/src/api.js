@@ -16,6 +16,7 @@ async function call(path, options = {}) {
 
 export const api = {
   workflows: () => call('/api/workflows'),
+  activate: (name, version) => call(`/api/workflows/${name}/${version}/activate`, { method: 'POST' }),
   list: () => call('/api/requests?limit=30'),
   explanation: (id) => call(`/api/requests/${id}/explanation`),
   submit: (workflow, payload, key) =>

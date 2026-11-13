@@ -19,4 +19,5 @@ module.exports = {
   ENABLE_RETRY_WORKER: (process.env.ENABLE_RETRY_WORKER || 'true') === 'true',
   WORKER_INTERVAL_MS: num(process.env.WORKER_INTERVAL_MS, 5000),
   STUCK_AFTER_MS: num(process.env.STUCK_AFTER_MS, 60000),
+  RECOVERY_LOCK_MS: num(process.env.RECOVERY_LOCK_MS, 60000),
 };

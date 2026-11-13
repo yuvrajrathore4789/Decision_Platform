@@ -8,6 +8,11 @@ exports.getLatest = asyncHandler(async (req, res) => res.json(await workflowServ
 
 exports.getVersion = asyncHandler(async (req, res) => res.json(await workflowService.getVersion(req.params.name, req.params.version)));
 
+exports.activate = asyncHandler(async (req, res) => {
+  const result = await workflowService.activate(req.params.name, req.params.version);
+  res.json({ ...result, message: `v${result.version} is now the live version for new requests. In-flight requests keep their pinned version.` });
+});
+
 exports.register = asyncHandler(async (req, res) => {
   const doc = await workflowService.register(req.body);
   res.status(201).json({ name: doc.name, version: doc.version, message: 'Workflow version registered. New requests use it; in-flight requests keep their pinned version.' });

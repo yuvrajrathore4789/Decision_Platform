@@ -24,14 +24,22 @@ stages:
     service: kyc
     max_attempts: 2
     backoff_ms: 1000
-    on_exhausted: manual_review
+    on_exhausted: kyc_review                  # provider down -> a human vouches for KYC, then the revenue rule still runs
     next: kyc_result
   kyc_result:
     type: rules
     rules:
       - { id: V3, description: KYC must be verified, expr: "kyc_check.verified == true", on_fail: reject }
+    next: revenue_check
+  revenue_check:
+    type: rules
+    rules:
       - { id: V4, description: Revenue must be at least 100000, expr: "annual_revenue >= 100000", on_fail: manual_review }
     next: approve
+  kyc_review:
+    type: manual_review
+    on_approve: revenue_check                 # resume here: approval skips V3 only, never V4
+    on_reject: reject
   approve: { type: terminal, outcome: APPROVED }
   reject: { type: terminal, outcome: REJECTED }
   manual_review: { type: manual_review }

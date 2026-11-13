@@ -1,0 +1,28 @@
+# Simulated external dependencies, defined as DATA. Adding a service = adding a block here (no code change),
+# then referencing it from a workflow stage:  type: external_call, service: <name>.
+#
+# kind: hash_score  -> deterministic number in [min, max] derived from payload[id_field]; output under `output_key`.
+#                      `mock_field` (simulation mode only) lets a test supply the number instead.
+# kind: static      -> always returns `response`. `mock_overrides` maps payload field -> response key (simulation only).
+# `response` is merged into every result (provider names, flags, ...).
+services:
+  credit_bureau:
+    kind: hash_score
+    id_field: applicant_id
+    output_key: score
+    min: 300
+    max: 850
+    mock_field: mock_credit_score
+    response: { bureau: SIMULATED_BUREAU }
+  kyc:
+    kind: static
+    response: { verified: true, riskLevel: LOW, provider: SIMULATED_KYC }
+    mock_overrides: { mock_kyc_verified: verified }
+  fraud_screening:
+    kind: hash_score
+    id_field: claim_id
+    output_key: risk_score
+    min: 0
+    max: 99
+    mock_field: mock_fraud_score
+    response: { provider: SIMULATED_FRAUD_ENGINE }

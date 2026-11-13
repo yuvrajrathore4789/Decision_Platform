@@ -22,8 +22,10 @@ const auditSchema = new mongoose.Schema(
     message: String,
     ruleTrace: { type: mongoose.Schema.Types.Mixed },
     data: { type: mongoose.Schema.Types.Mixed },
+    prevHash: String, // hash chain: tamper evidence (see audit.service)
+    hash: String,
   },
-  { _id: false }
+  { _id: false, minimize: false }
 );
 
 /**
@@ -43,6 +45,7 @@ const schema = new mongoose.Schema(
     context: { type: mongoose.Schema.Types.Mixed, default: {} }, // outputs of external stages
     attempts: { type: mongoose.Schema.Types.Mixed, default: {} }, // { stageId: count }
     nextRetryAt: Date,
+    lockedUntil: Date, // recovery lease: a worker owns this request until then
     decision: { type: mongoose.Schema.Types.Mixed, default: null },
     stateHistory: { type: [stateHistorySchema], default: [] },
     auditLog: { type: [auditSchema], default: [] },

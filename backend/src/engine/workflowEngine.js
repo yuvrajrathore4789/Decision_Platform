@@ -6,7 +6,7 @@
  *   rules          evaluate rules; pass -> stage.next, fail -> the failing rule's on_fail stage
  *   branch         conditional routing: first matching branch -> its next stage, otherwise stage.default
  *   external_call  call a dependency; failure -> RETRY_PENDING (backoff) or on_exhausted after max attempts
- *   manual_review  park the request until a human decides
+ *   manual_review  park the request until a human decides; then resume at on_approve / on_reject (default: a terminal stage)
  *   terminal       final outcome (APPROVED / REJECTED)
  *
  * After EVERY stage the request is saved, so a crash loses at most one step and the
@@ -155,15 +155,20 @@ async function review(request, definition, { decision, reviewer, comment }) {
   if (!current || current.type !== 'manual_review') {
     throw new AppError(409, 'CONFLICT', 'Request is not waiting at a manual_review stage');
   }
-  const outcome = decision === 'approve' ? 'APPROVED' : 'REJECTED';
-  const target = Object.entries(definition.stages).find(([, s]) => s.type === 'terminal' && s.outcome === outcome);
-  if (!target) throw new AppError(422, 'UNPROCESSABLE', `Workflow has no terminal stage for ${outcome}`);
+  // Resume where the config says (on_approve / on_reject) so later rules still run; otherwise go straight to a terminal stage.
+  let targetId = decision === 'approve' ? current.on_approve : current.on_reject;
+  if (!targetId) {
+    const outcome = decision === 'approve' ? 'APPROVED' : 'REJECTED';
+    const terminal = Object.entries(definition.stages).find(([, s]) => s.type === 'terminal' && s.outcome === outcome);
+    if (!terminal) throw new AppError(422, 'UNPROCESSABLE', `Workflow has no terminal stage for ${outcome}`);
+    targetId = terminal[0];
+  }
   audit.add(request, {
     type: 'MANUAL_REVIEW_DECISION', stage: request.currentStage,
     message: `${reviewer} chose to ${decision}${comment ? `: ${comment}` : ''}`,
-    data: { reviewer, decision, comment: comment || null },
+    data: { reviewer, decision, comment: comment || null, resumeAt: targetId },
   });
-  goto(request, target[0], `Manual review by ${reviewer}: ${decision}${comment ? ` (${comment})` : ''}`);
+  goto(request, targetId, `Manual review by ${reviewer}: ${decision}${comment ? ` (${comment})` : ''}`);
   await request.save();
   return run(request, definition);
 }

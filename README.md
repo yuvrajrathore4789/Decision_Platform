@@ -35,6 +35,9 @@ cd backend
 npm test
 ```
 
+Coverage report: `npm run test:coverage` (prints a table and writes `backend/coverage/`).
+**Latest coverage** (91 tests): statements 88.2%, branches 76.5%, functions 93.0%, lines 93.7%.
+
 Tests use an in-memory MongoDB (`mongodb-memory-server`; the first run downloads a MongoDB binary). To use a real
 instance instead: `TEST_MONGO_URI=mongodb://127.0.0.1:27017/dp_test npm test`.
 
@@ -50,6 +53,11 @@ instance instead: `TEST_MONGO_URI=mongodb://127.0.0.1:27017/dp_test npm test`.
 | Config graph validation | `tests/workflowGraph.test.js`: cycles, unreachable stages, manual-review terminals |
 | Simulation hooks gated | `tests/claimProcessing.test.js` (SIMULATION_MODE) |
 | Rules engine | `tests/rulesEngine.test.js`; config validation: `tests/workflowValidator.test.js` |
+| Audit hash chain (tamper detection) | `tests/auditChain.test.js` (unit), `tests/robustness.test.js` (stored log tampered in the DB) |
+| Manual review resumes the workflow | `tests/reviewResume.test.js` (unit), `tests/robustness.test.js` (vendor_approval, KYC outage) |
+| Config-defined dependencies | `tests/serviceRegistry.test.js` |
+| Workflow activate / rollback | `tests/robustness.test.js` |
+| Recovery lease (two workers) | `tests/robustness.test.js` |
 
 ## API (full docs at `/docs`)
 
@@ -57,12 +65,13 @@ instance instead: `TEST_MONGO_URI=mongodb://127.0.0.1:27017/dp_test npm test`.
 |---|---|---|
 | POST | `/api/requests` | Submit (header `Idempotency-Key` optional). 201 new, 200 duplicate |
 | GET | `/api/requests` / `/api/requests/:id` | List / status |
-| GET | `/api/requests/:id/audit` | Raw audit log + state history |
+| GET | `/api/requests/:id/audit` | Raw audit log + state history + hash-chain `integrity` verdict |
 | GET | `/api/requests/:id/explanation` | Human-readable decision with rule trace |
 | POST | `/api/requests/:id/retry` | Retry a `RETRY_PENDING` request now |
 | POST | `/api/requests/:id/review` | Approve/reject a `MANUAL_REVIEW` request |
 | GET/POST | `/api/workflows` | List versions / register a new version (rule change, no redeploy) |
 | GET | `/api/workflows/:name[/:version]` | Read a definition |
+| POST | `/api/workflows/:name/:version/activate` | Make a stored version the live one (rollback / roll-forward) |
 
 ### Try it
 
@@ -87,6 +96,27 @@ Test hooks in the payload (simulation only): `mock_credit_score`, `mock_kyc_veri
 `NODE_ENV=production`). When it is `false`, a payload containing a hook is rejected with `400` and the adapters ignore
 them, so a caller can never supply their own credit score. Set it in `backend/.env` (see `backend/.env.example`).
 
+### Roll back a workflow version
+
+```bash
+# v2 turned out too strict? Make v1 live again. Nothing is rewritten; in-flight requests keep their pinned version.
+curl -s -X POST localhost:3000/api/workflows/loan_approval/1/activate
+```
+
+### Add a dependency without code
+
+External services are defined in `backend/config/services.yaml` (`kind: hash_score` or `kind: static`). Add a block,
+restart, then use `type: external_call, service: <name>` in any workflow. See `docs/architecture.md` section 3.
+
+### Manual review that resumes the workflow
+
+A `manual_review` stage can name where to continue after the human decision, so later rules still run:
+
+```yaml
+kyc_review: { type: manual_review, on_approve: revenue_check, on_reject: reject }
+```
+Without `on_approve` / `on_reject` the decision goes straight to a terminal stage (the original behaviour).
+
 ### Conditional branching example (claim_processing)
 
 ```bash
@@ -100,6 +130,7 @@ curl -s -X POST localhost:3000/api/requests -H 'Content-Type: application/json' 
 ```
 backend/
   config/workflows/        loan_approval, vendor_approval, claim_processing (.yaml)   <- the configuration model
+  config/services.yaml     simulated external dependencies (credit_bureau, kyc, fraud_screening)
   src/
     app.js, server.js      Express app / process bootstrap
     config/                env, db connection, swagger spec
@@ -112,7 +143,7 @@ backend/
     adapters/              simulated external dependencies with failure injection
     models/                Mongoose schemas: Request, WorkflowDefinition, IdempotencyKey
     utils/                 errors, constants, hashing, workflow validator, presenters
-  .env.example             copy to .env
+  .env.example             copy to .env (all settings, with defaults)
   scripts/generateExamples.js   regenerates docs/decision_examples.md from the real engine
   tests/
 frontend/                  minimal React UI (submit, list, explanation, retry/review)
