@@ -2,8 +2,9 @@
 /**
  * Workflow engine: a config-driven state machine.
  *
- * It knows NOTHING about loans, vendors or claims. It only knows 4 stage types:
+ * It knows NOTHING about loans, vendors or claims. It only knows 5 stage types:
  *   rules          evaluate rules; pass -> stage.next, fail -> the failing rule's on_fail stage
+ *   branch         conditional routing: first matching branch -> its next stage, otherwise stage.default
  *   external_call  call a dependency; failure -> RETRY_PENDING (backoff) or on_exhausted after max attempts
  *   manual_review  park the request until a human decides
  *   terminal       final outcome (APPROVED / REJECTED)
@@ -12,7 +13,7 @@
  * request can be resumed from its persisted currentStage (see retryWorker recovery).
  * The engine works on any object with the Request shape + save(), so it is testable without a DB.
  */
-const { evaluateRules } = require('./rulesEngine');
+const { evaluateRules, evaluateRule } = require('./rulesEngine');
 const audit = require('../services/audit.service');
 const adapter = require('../adapters/dependencyAdapter');
 const env = require('../config/env');
@@ -56,6 +57,30 @@ const handlers = {
     const failed = result.failedRule;
     const lastTrace = result.trace[result.trace.length - 1];
     return goto(request, failed.on_fail, `Rule ${failed.id}${failed.description ? ` (${failed.description})` : ''} failed: ${lastTrace.reason}`);
+  },
+
+  /** Conditional branching: evaluate branches in order, take the first that matches, else the default route. */
+  async branch({ request, stage, stageId }) {
+    const data = facts(request);
+    const trace = [];
+    let matched = null;
+    for (const b of stage.branches) {
+      const entry = evaluateRule(b, data); // a branch condition is just a rule; an erroring condition does not match
+      trace.push(entry);
+      if (entry.passed) { matched = b; break; }
+    }
+    const target = matched ? matched.next : stage.default;
+    audit.add(request, {
+      type: 'BRANCH_TAKEN',
+      stage: stageId,
+      message: matched ? `Branch ${matched.id} matched -> ${target}` : `No branch matched -> default route ${target}`,
+      ruleTrace: trace,
+      data: { inputs: audit.collectInputs(trace), matched: matched ? matched.id : null, next: target },
+    });
+    const reason = matched
+      ? `Branch ${matched.id}${matched.description ? ` (${matched.description})` : ''} matched: ${trace[trace.length - 1].reason}`
+      : `No branch matched in "${stageId}" (${stage.branches.length} checked); default route to "${target}"`;
+    return goto(request, target, reason);
   },
 
   async external_call({ request, stage, stageId }) {

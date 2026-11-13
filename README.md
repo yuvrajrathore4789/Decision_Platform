@@ -4,8 +4,8 @@ A generic, configuration-driven workflow engine. It accepts structured requests,
 workflow stages (including a simulated external dependency), keeps full state history and an audit trail, and handles
 retries, duplicates and failures. **Business logic lives in YAML/JSON workflow definitions, not in code.**
 
-Two use cases ship in `backend/config/workflows/` and run on the same engine with zero code differences:
-`loan_approval` and `vendor_approval`.
+Three use cases ship in `backend/config/workflows/` and run on the same engine with zero code differences:
+`loan_approval`, `vendor_approval` and `claim_processing` (the last one demonstrates conditional `branch` routing).
 
 **Stack:** MongoDB + Express + React (Vite) + Node.js, REST API, Jest/Supertest tests, Swagger UI.
 
@@ -46,6 +46,9 @@ instance instead: `TEST_MONGO_URI=mongodb://127.0.0.1:27017/dp_test npm test`.
 | Dependency failure | `tests/api.test.js` (4): failure, timeout, retries exhausted |
 | Retry flow | `tests/api.test.js` (5): manual retry, concurrent retries, background worker, stuck-request recovery |
 | Rule change | `tests/api.test.js` (6): pinned versions, immutability, invalid config rejected |
+| Conditional branching | `tests/branchStage.test.js` (unit), `tests/claimProcessing.test.js` (API, third workflow) |
+| Config graph validation | `tests/workflowGraph.test.js`: cycles, unreachable stages, manual-review terminals |
+| Simulation hooks gated | `tests/claimProcessing.test.js` (SIMULATION_MODE) |
 | Rules engine | `tests/rulesEngine.test.js`; config validation: `tests/workflowValidator.test.js` |
 
 ## API (full docs at `/docs`)
@@ -77,14 +80,26 @@ curl -s -X POST localhost:3000/api/requests -H 'Content-Type: application/json' 
 curl -s localhost:3000/api/requests/<id>/explanation
 ```
 
-Test hooks in the payload (simulation only): `mock_credit_score`, `mock_kyc_verified`, and
+Test hooks in the payload (simulation only): `mock_credit_score`, `mock_kyc_verified`, `mock_fraud_score`, and
 `simulate_failure: {service, fail_times, mode: "error"|"timeout"}`.
+
+**Simulation mode.** These hooks are honoured only when `SIMULATION_MODE=true` (the default, except when
+`NODE_ENV=production`). When it is `false`, a payload containing a hook is rejected with `400` and the adapters ignore
+them, so a caller can never supply their own credit score. Set it in `backend/.env` (see `backend/.env.example`).
+
+### Conditional branching example (claim_processing)
+
+```bash
+# Theft claim -> branch B2 routes it to fraud screening -> low risk -> APPROVED
+curl -s -X POST localhost:3000/api/requests -H 'Content-Type: application/json' \
+  -d '{"workflow":"claim_processing","payload":{"claim_id":"CL-1","policy_id":"P-1","policy_active":true,"incident_type":"theft","claim_amount":8000,"coverage_limit":100000,"mock_fraud_score":12}}'
+```
 
 ## Project layout
 
 ```
 backend/
-  config/workflows/        loan_approval.yaml, vendor_approval.yaml   <- the configuration model
+  config/workflows/        loan_approval, vendor_approval, claim_processing (.yaml)   <- the configuration model
   src/
     app.js, server.js      Express app / process bootstrap
     config/                env, db connection, swagger spec
@@ -97,6 +112,7 @@ backend/
     adapters/              simulated external dependencies with failure injection
     models/                Mongoose schemas: Request, WorkflowDefinition, IdempotencyKey
     utils/                 errors, constants, hashing, workflow validator, presenters
+  .env.example             copy to .env
   scripts/generateExamples.js   regenerates docs/decision_examples.md from the real engine
   tests/
 frontend/                  minimal React UI (submit, list, explanation, retry/review)

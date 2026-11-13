@@ -10,7 +10,7 @@ configuration-driven behaviour.
 distributed queues, real external integrations.
 
 **Core idea:** separate *what the business wants* (workflow definition: data) from *how decisions are executed*
-(engine: code). The engine knows four stage types and nothing about loans or vendors.
+(engine: code). The engine knows five stage types and nothing about loans, vendors or claims.
 
 ## 2. Components
 
@@ -54,6 +54,7 @@ A workflow is a document: `schema` (JSON Schema for intake), `start`, and `stage
 | Stage type | Config | Behaviour |
 |---|---|---|
 | `rules` | `rules[]`, `next` | Rules run in order. All pass -> `next`. First failure -> that rule's `on_fail` stage |
+| `branch` | `branches[]` (rule-shaped condition + `next`), `default` | Conditional routing on the passing path: first matching branch wins, otherwise `default`. Every evaluated condition is traced |
 | `external_call` | `service`, `max_attempts`, `backoff_ms`, `timeout_ms`, `next`, `on_exhausted` | Success stores output in context. Failure -> `RETRY_PENDING` with exponential backoff; after `max_attempts` -> `on_exhausted` |
 | `manual_review` | none | Parks the request until `POST /review` |
 | `terminal` | `outcome: APPROVED \| REJECTED` | Final decision |
@@ -64,7 +65,9 @@ Rules can read the request payload and the outputs of earlier stages (`credit_ch
 
 **Changing requirements:** edit a threshold, add a stage, or re-route a failure in YAML, or `POST /api/workflows` with a
 new `version`. Definitions are validated on load (unknown stages, bad expressions, unknown services, missing terminals),
-so a bad config is rejected instead of activated. A new use case is a new file: `vendor_approval.yaml` required no code.
+so a bad config is rejected instead of activated. A new use case is a new file: `vendor_approval.yaml` and `claim_processing.yaml` required no engine code.
+
+**Graph validation at load time:** besides references and expressions, the validator builds the stage graph and rejects cycles, stages unreachable from `start`, and a `manual_review` stage without both an `APPROVED` and a `REJECTED` terminal. The runtime step limit remains as a second line of defence. A retry is not a cycle: it is a state (`RETRY_PENDING`) on the same stage.
 
 ## 4. Data flow
 
@@ -110,7 +113,8 @@ Every transition appends `{from, to, fromStage, toStage, reason, at}` to `stateH
 | Concurrent retries / reviews | Atomic claim `findOneAndUpdate({status: expected} -> IN_PROGRESS)`; only one caller wins, others get 409 |
 | Partial save failure | State, history and audit are in **one document**, so each step is a single atomic write. If the process dies between "key claimed" and "request saved", the next duplicate finds the orphan key and completes creation. If it dies mid-run, the request stays `IN_PROGRESS` and the worker resumes it from the persisted stage |
 | Optimistic concurrency | Mongoose version key; conflicts surface as 409 |
-| Misconfigured cycles | Engine step limit (50) |
+| Misconfigured cycles | Rejected when the workflow is loaded (graph check); engine step limit (50) as a runtime backstop |
+| Simulation hooks abused | `mock_*` / `simulate_failure` payload fields are rejected with 400 and ignored by the adapters unless `SIMULATION_MODE=true` |
 | Rule that cannot be evaluated | Counts as **failed**, never silently passed |
 
 ## 7. Explainability and audit
@@ -136,7 +140,7 @@ decision can be reproduced against the exact rules that made it. See `docs/decis
 ## 9. Assumptions
 - One workflow definition per business use case; the latest active version applies to new requests.
 - Payload contents are structured JSON; PII handling and encryption are out of scope.
-- The external dependency is simulated; real adapters implement the same `call(service, {payload, attempt, timeoutMs})` contract.
+- The external dependency is simulated (credit bureau, KYC, fraud screening); test hooks in the payload are a simulation aid and are disabled with `SIMULATION_MODE=false`; real adapters implement the same `call(service, {payload, attempt, timeoutMs})` contract.
 - Manual reviewers are identified by a name string; authentication is out of scope.
 - Duplicate detection without a key assumes identical payload means the same logical request.
 
@@ -154,5 +158,4 @@ decision can be reproduced against the exact rules that made it. See `docs/decis
 
 ## 11. Known limitations
 - No authentication or authorization.
-- No cycle detection at config-load time (runtime step limit only).
 - Rules evaluate at stage level; no parallel stages or sub-workflows.

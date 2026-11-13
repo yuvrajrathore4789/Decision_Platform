@@ -11,6 +11,10 @@ module.exports = {
   RETRY_BASE_MS: num(process.env.RETRY_BASE_MS, 2000),
   DEPENDENCY_TIMEOUT_MS: num(process.env.DEPENDENCY_TIMEOUT_MS, 3000),
   DEPENDENCY_FAIL_MODE: process.env.DEPENDENCY_FAIL_MODE || 'none', // none | always
+  // Test hooks (mock_* / simulate_failure in the payload). On by default except in production.
+  SIMULATION_MODE: process.env.SIMULATION_MODE !== undefined
+    ? process.env.SIMULATION_MODE === 'true'
+    : (process.env.NODE_ENV || 'development') !== 'production',
   // Background worker
   ENABLE_RETRY_WORKER: (process.env.ENABLE_RETRY_WORKER || 'true') === 'true',
   WORKER_INTERVAL_MS: num(process.env.WORKER_INTERVAL_MS, 5000),

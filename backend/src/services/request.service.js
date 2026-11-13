@@ -7,7 +7,7 @@ const idempotency = require('./idempotency.service');
 const audit = require('./audit.service');
 const engine = require('../engine/workflowEngine');
 const env = require('../config/env');
-const { STATUS } = require('../utils/constants');
+const { STATUS, SIMULATION_HOOK_FIELDS } = require('../utils/constants');
 const { sha256 } = require('../utils/hash');
 const { badRequest, notFound, conflict, unprocessable } = require('../utils/errors');
 
@@ -33,6 +33,15 @@ function assertSafeKeys(value, path = '') {
       if (k.startsWith('$') || k.includes('.')) throw badRequest(`Illegal field name "${k}" at ${path || '/'}`);
       assertSafeKeys(v, `${path}.${k}`);
     }
+  }
+}
+
+/** Simulation hooks let a caller fake dependency results, so they are refused unless SIMULATION_MODE is on. */
+function assertNoSimulationHooks(payload) {
+  if (env.SIMULATION_MODE) return;
+  const used = SIMULATION_HOOK_FIELDS.filter((f) => Object.prototype.hasOwnProperty.call(payload, f));
+  if (used.length) {
+    throw badRequest(`Simulation hooks are disabled (SIMULATION_MODE=false): ${used.join(', ')}`, used.map((f) => ({ path: `/${f}`, message: 'not allowed outside simulation mode' })));
   }
 }
 
@@ -63,6 +72,7 @@ async function list({ status, workflow, limit = 20, skip = 0 } = {}) {
 async function submit({ workflow, payload, idempotencyKey }) {
   const def = await workflowService.getActive(workflow);
   assertSafeKeys(payload);
+  assertNoSimulationHooks(payload);
   validatePayload(def, payload);
 
   const payloadHash = sha256(payload);

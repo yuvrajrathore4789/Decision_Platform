@@ -1,0 +1,47 @@
+# Third use case on the SAME engine. Showcases the `branch` stage (conditional routing on a passing path).
+workflow: claim_processing
+version: 1
+schema:
+  type: object
+  required: [claim_id, policy_id, policy_active, incident_type, claim_amount, coverage_limit]
+  properties:
+    claim_id: { type: string, minLength: 1 }
+    policy_id: { type: string, minLength: 1 }
+    policy_active: { type: boolean }
+    incident_type: { type: string, enum: [accident, theft, medical, property] }
+    claim_amount: { type: number, exclusiveMinimum: 0 }
+    coverage_limit: { type: number, minimum: 0 }
+    mock_fraud_score: { type: number }       # test hook for the simulated fraud engine
+    simulate_failure: { type: object }       # test hook: { service, fail_times, mode }
+start: eligibility
+stages:
+  eligibility:
+    type: rules
+    rules:
+      - { id: C1, description: Policy must be active, field: policy_active, op: eq, value: true, on_fail: reject }
+      - { id: C2, description: Claim must not exceed the coverage limit, expr: "claim_amount <= coverage_limit", on_fail: reject }
+    next: route_by_risk
+  route_by_risk:
+    type: branch                              # first matching branch wins, otherwise `default`
+    branches:
+      - { id: B1, description: High-value claim needs fraud screening, expr: "claim_amount > 50000", next: fraud_check }
+      - { id: B2, description: Theft claims always need fraud screening, expr: "incident_type == 'theft'", next: fraud_check }
+      - { id: B3, description: Mid-value claim needs an adjuster, expr: "claim_amount > 10000", next: manual_review }
+    default: approve                          # small, low-risk claims are auto-approved
+  fraud_check:
+    type: external_call
+    service: fraud_screening
+    max_attempts: 3
+    backoff_ms: 1000
+    timeout_ms: 2000
+    on_exhausted: manual_review
+    next: fraud_result
+  fraud_result:
+    type: rules
+    rules:
+      - { id: C3, description: Fraud risk score must be below 70, expr: "fraud_check.risk_score < 70", on_fail: reject }
+      - { id: C4, description: Fraud risk score below 40 for auto-approval, expr: "fraud_check.risk_score < 40", on_fail: manual_review }
+    next: approve
+  approve: { type: terminal, outcome: APPROVED }
+  reject: { type: terminal, outcome: REJECTED }
+  manual_review: { type: manual_review }

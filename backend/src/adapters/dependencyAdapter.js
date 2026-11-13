@@ -6,6 +6,7 @@
  *   "simulate_failure": { "service": "credit_bureau", "fail_times": 2, "mode": "error" | "timeout" }
  * -> the first `fail_times` attempts fail; later attempts succeed.
  * Global switch: DEPENDENCY_FAIL_MODE=always makes every call fail.
+ * All payload hooks (simulate_failure, mock_*) are honoured ONLY when env.SIMULATION_MODE is true.
  */
 const crypto = require('crypto');
 const env = require('../config/env');
@@ -23,7 +24,7 @@ function withTimeout(promise, ms, service) {
 
 async function maybeFail(service, payload, attempt, timeoutMs) {
   if (env.DEPENDENCY_FAIL_MODE === 'always') throw new DependencyError(service, '503 Service Unavailable (global fail mode)');
-  const sim = payload && payload.simulate_failure;
+  const sim = env.SIMULATION_MODE && payload ? payload.simulate_failure : undefined;
   if (sim && sim.service === service && attempt <= Number(sim.fail_times || 0)) {
     if (sim.mode === 'timeout') await sleep(timeoutMs + 5000); // outlives the timeout wrapper
     throw new DependencyError(service, `503 Service Unavailable (injected failure, attempt ${attempt})`);
@@ -32,13 +33,19 @@ async function maybeFail(service, payload, attempt, timeoutMs) {
 
 const SERVICES = {
   async credit_bureau({ payload }) {
-    const score = payload.mock_credit_score !== undefined
+    const score = env.SIMULATION_MODE && payload.mock_credit_score !== undefined
       ? Number(payload.mock_credit_score)
       : 300 + (parseInt(crypto.createHash('sha256').update(String(payload.applicant_id)).digest('hex').slice(0, 6), 16) % 551);
     return { score, bureau: 'SIMULATED_BUREAU' };
   },
   async kyc({ payload }) {
-    return { verified: payload.mock_kyc_verified !== false, riskLevel: 'LOW', provider: 'SIMULATED_KYC' };
+    return { verified: !(env.SIMULATION_MODE && payload.mock_kyc_verified === false), riskLevel: 'LOW', provider: 'SIMULATED_KYC' };
+  },
+  async fraud_screening({ payload }) {
+    const riskScore = env.SIMULATION_MODE && payload.mock_fraud_score !== undefined
+      ? Number(payload.mock_fraud_score)
+      : parseInt(crypto.createHash('sha256').update(String(payload.claim_id)).digest('hex').slice(0, 6), 16) % 100;
+    return { risk_score: riskScore, provider: 'SIMULATED_FRAUD_ENGINE' };
   },
 };
 

@@ -12,6 +12,12 @@ const SAMPLES = {
     'Approve': { vendor_id: 'V-77', country: 'IN', years_in_business: 5, annual_revenue: 500000 },
     'Reject (unsupported country)': { vendor_id: 'V-78', country: 'XX', years_in_business: 5, annual_revenue: 500000 },
   },
+  claim_processing: {
+    'Auto-approve (small claim)': { claim_id: 'CL-1', policy_id: 'P-1', policy_active: true, incident_type: 'accident', claim_amount: 4200, coverage_limit: 100000 },
+    'Theft -> fraud check -> approve': { claim_id: 'CL-2', policy_id: 'P-1', policy_active: true, incident_type: 'theft', claim_amount: 8000, coverage_limit: 100000, mock_fraud_score: 12 },
+    'Mid-value -> manual review': { claim_id: 'CL-3', policy_id: 'P-1', policy_active: true, incident_type: 'property', claim_amount: 25000, coverage_limit: 100000 },
+    'Fraud engine fails once (retry)': { claim_id: 'CL-4', policy_id: 'P-1', policy_active: true, incident_type: 'medical', claim_amount: 80000, coverage_limit: 150000, mock_fraud_score: 5, simulate_failure: { service: 'fraud_screening', fail_times: 1 } },
+  },
 };
 
 const Badge = ({ status }) => <span className={`badge ${status}`}>{status}</span>;

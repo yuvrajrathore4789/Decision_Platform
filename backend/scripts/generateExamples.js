@@ -13,7 +13,7 @@ const audit = require('../src/services/audit.service');
 const { sha256 } = require('../src/utils/hash');
 
 const load = (f) => yaml.load(fs.readFileSync(path.join(__dirname, '..', 'config', 'workflows', f), 'utf8'));
-const DEFS = { loan_approval: load('loan_approval.yaml'), vendor_approval: load('vendor_approval.yaml') };
+const DEFS = { loan_approval: load('loan_approval.yaml'), vendor_approval: load('vendor_approval.yaml'), claim_processing: load('claim_processing.yaml') };
 
 function makeRequest(workflow, payload) {
   const def = DEFS[workflow];
@@ -41,6 +41,14 @@ const scenarios = [
       simulate_failure: { service: 'credit_bureau', fail_times: 10 } } },
   { title: '7. Second workflow (vendor_approval), same engine: APPROVED', workflow: 'vendor_approval',
     payload: { vendor_id: 'V-77', country: 'IN', years_in_business: 5, annual_revenue: 500000 } },
+  { title: '8. Conditional branching (claim_processing): small claim takes the default branch, APPROVED', workflow: 'claim_processing',
+    payload: { claim_id: 'CL-2001', policy_id: 'P-9', policy_active: true, incident_type: 'accident', claim_amount: 4200, coverage_limit: 100000 } },
+  { title: '9. Conditional branching: theft claim is routed to fraud screening by branch B2, then APPROVED', workflow: 'claim_processing',
+    payload: { claim_id: 'CL-2002', policy_id: 'P-9', policy_active: true, incident_type: 'theft', claim_amount: 8000, coverage_limit: 100000, mock_fraud_score: 12 } },
+  { title: '10. Conditional branching: mid-value claim is routed to MANUAL_REVIEW by branch B3', workflow: 'claim_processing',
+    payload: { claim_id: 'CL-2003', policy_id: 'P-9', policy_active: true, incident_type: 'property', claim_amount: 25000, coverage_limit: 100000 } },
+  { title: '11. High-value claim, high fraud score: REJECTED after fraud screening', workflow: 'claim_processing',
+    payload: { claim_id: 'CL-2004', policy_id: 'P-9', policy_active: true, incident_type: 'medical', claim_amount: 90000, coverage_limit: 150000, mock_fraud_score: 88 } },
 ];
 
 (async () => {
